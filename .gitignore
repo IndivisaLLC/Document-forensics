@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+demo_output.json
+batch_report.csv
+*.egg-info/
+.venv/
