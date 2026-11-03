@@ -145,6 +145,22 @@ without an external per-process timeout.
 Correcting the extraction patterns, adding byte-span provenance, and full DOCX
 fidelity are planned but **not yet present**.
 
+## Tests
+
+`tests/` covers every `parse_pdf` branch against real fixtures: text (single and
+multi-page) → `OK`, image-only/scanned and blank → `NO_TEXT`, encrypted and
+malformed → `FAILED`, and pypdf-absent → `MISSING_DEPENDENCY`. The suite also
+asserts a failed parse is never analysed as text yet still carries
+`source_sha256`.
+
+```sh
+python tests/test_pdf.py          # standalone, needs only pypdf
+# or, under pytest:  pip install pytest && pytest tests/
+```
+
+Fixtures are committed under `tests/fixtures/`; regenerate them with
+`python tests/make_pdf_fixtures.py` (dev deps: `reportlab pillow img2pdf pypdf`).
+
 ## License
 
 MIT — see the `LICENSE` file and the module header.
