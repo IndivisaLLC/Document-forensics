@@ -1,220 +1,166 @@
-# Document-forensics
-Unified Text Extraction Engine (Air-Gapped E-Discovery) A zero-dependency, portable forensic text extraction pipeline designed for stealthy, local e-discovery and investigative data analysis.
 # docforensics
 
-A zero-dependency document forensics and text extraction engine for Python.
+An **air-gap-compatible, standard-library-first document text-triage tool.** It
+extracts configurable textual indicators, basic entities, terms, document
+structure, and selected DOCX revision text for exploratory analysis of `.docx`,
+`.txt`, `.md`, `.py`, and `.pdf` files, and writes a flat CSV/JSON summary.
 
-Combines ten extraction methods into a single pipeline and outputs a structured
-JSON result or a batch CSV report across an entire folder of documents.
+**Results are heuristic and intended for first-pass triage and manual review.
+docforensics is _not_, in its current form, a chain-of-custody, evidentiary-
+authentication, or full-fidelity e-discovery engine.** See
+[Scope & limitations](#scope--limitations) before relying on any output.
 
-```
-$ python docforensics.py
-──────────────────────────────────────────────────────────────────────
-  DOMAIN FLAGS
-  ⚑ currency_exposure     1 hit(s)  ['£180 m']
-  ⚑ facility_distress     1 hit(s)  ['facility default']
-```
+---
 
------
+## What it does
 
-## Why this exists
+Ten extraction passes over each document:
 
-Most document analysis tools require heavyweight NLP frameworks (spaCy, NLTK,
-transformers) just to answer simple questions like:
+| # | Method | Notes |
+|---|---|---|
+| 1 | Python AST analysis | string literals, imports, function/class names — parsed, never executed |
+| 2 | Regex extraction | emails, URLs, dates, money, phones, citations, percentages — **values are approximate** (see limitations) |
+| 3 | Rule-based NER | persons, orgs, statutes, SEC filings, case names — **recall/precision are limited** |
+| 4 | TF-IDF | cross-document term-importance scoring (not a financial-figure comparison) |
+| 5 | N-grams | unigram / bigram / trigram frequency counts |
+| 6 | Co-occurrence graph | weighted edges over filtered keywords (general terms, not named entities); deterministic output |
+| 7 | Document structure | line-based headings / paragraphs / lists / tables (plain text & Markdown) |
+| 8 | Readability | Flesch Reading Ease, Gunning Fog (approximate syllables) |
+| 9 | SHA-256 fingerprinting | `source_sha256` (integrity) + `normalized_text_sha256` (dedup) — see [Hashing](#hashing) |
+| 10 | Domain flag patterns | pluggable regex groups; each becomes a summary + CSV column |
 
-- Which of these 400 contracts mentions a facility default?
-- Does this public filing contain the same financial figures as the internal draft?
-- Were any paragraphs deleted from this Word document before it was filed?
-- Which documents share the same SHA-256 hash as the version I have?
+Every extraction carries a **typed outcome** — `OK`, `PARTIAL`, `NO_TEXT`,
+`FAILED`, `MISSING_DEPENDENCY`, or `UNSUPPORTED` — so a parse failure is never
+silently analysed as document text.
 
-`docforensics` answers all of these using nothing but the Python standard library
-(plus one optional dependency for PDFs).
+## Install
 
------
+No install step for the core. Python **3.10+**, standard library only.
 
-## Features
-
-|Method                       |What it does                                                                                                                       |
-|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
-|**Python AST analysis**      |Parses `.py` files into a syntax tree — extracts string literals, imports, function and class names, node type counts              |
-|**Regex extraction**         |Emails, URLs, dates, USD/GBP/EUR amounts, phone numbers, citations, section headings, code blocks, percentages, stock tickers      |
-|**Rule-based NER**           |Persons (title-prefixed), organisations (Inc/LLC/Corp etc.), statutes (CFR/USC), SEC filing types (10-K/10-Q/8-K), case citations  |
-|**TF-IDF**                   |Pure-Python cross-document term weighting. Pass an internal draft alongside a public filing to surface term divergence between them|
-|**N-gram extraction**        |Unigrams, bigrams, trigrams with frequency counts                                                                                  |
-|**Co-occurrence graph**      |Sliding-window keyword relationship mapping — returns a weighted adjacency list ready for graph visualisation                      |
-|**Document structure**       |Headings (with depth), paragraphs, bullet/numbered lists, pipe-delimited tables                                                    |
-|**Readability metrics**      |Flesch Reading Ease and Gunning Fog Index                                                                                          |
-|**SHA-256 fingerprinting**   |Tamper-evident identity for every document processed                                                                               |
-|**Pluggable domain patterns**|Add your own `re.compile()` entries to `DOMAIN_PATTERNS` — they auto-appear as columns in the batch CSV                            |
-
------
-
-## Installation
-
-```bash
-# Core engine — no dependencies
-git clone https://github.com/your-username/docforensics
-cd docforensics
-
-# Optional: PDF support
-pip install pypdf
+```sh
+git clone https://github.com/IndivisaLLC/Document-forensics
+cd Document-forensics
 ```
 
-Requires Python 3.10+.
+PDF support is **optional** and the one external dependency:
 
------
+```sh
+pip install pypdf      # required only for .pdf; all other formats are stdlib-only
+```
+
+Without `pypdf`, PDFs return `outcome=MISSING_DEPENDENCY` (they are not analysed
+as an error string).
 
 ## Usage
 
-### Single file
-
 ```python
-from docforensics import ingest_and_extract
+from docforensics import ingest_and_extract, batch_process, extract
 
+# Single file (reads raw bytes, computes source_sha256, typed outcome)
 result = ingest_and_extract("contract.docx")
-print(result.to_dict())
-```
+print(result.to_dict()["outcome"])        # OK / PARTIAL / NO_TEXT / FAILED / ...
 
-Supports: `.docx` `.pdf` `.txt` `.md` `.py`
-
-### Raw text
-
-```python
-from docforensics import extract
-
-result = extract("The quick brown fox...")
-result.to_dict()  # JSON-serialisable dict
-```
-
-### Batch folder → CSV
-
-```python
-from docforensics import batch_process
-
+# Batch a folder → CSV (deterministic order, one read per file)
 batch_process("/path/to/documents", "report.csv")
+
+# Raw in-memory text (no source file → source_sha256 is None)
+result = extract("The quick brown fox...")
 ```
 
-Walks the folder recursively, processes every supported file, and writes one
-row per document to `report.csv`.
+Run the built-in demo:
 
-### Cross-document TF-IDF
-
-Pass an internal draft alongside the public version to see which terms appear
-in one but not the other:
-
-```python
-from docforensics import ingest_and_extract
-
-internal = open("draft_v3.txt").read()
-public   = open("filed_version.txt").read()
-
-# Run extraction on the internal doc, with the public filing as context
-result = ingest_and_extract("draft_v3.txt", extra_documents=[public])
-
-# doc_0 = internal draft terms, doc_1 = public filing terms
-print(result.tfidf["doc_0"][:10])
-print(result.tfidf["doc_1"][:10])
+```sh
+python docforensics.py          # prints a demo extraction, writes demo_output.json
 ```
 
------
+## Hashing
 
-## DOCX track-changes (deleted text)
+Two **distinct** hashes, with different meanings — do not conflate them:
 
-A `.docx` file is a ZIP archive containing XML. Word’s Track Changes feature
-stores deleted text in `<w:delText>` nodes — content that is invisible in the
-rendered document but still present in the raw file.
+- **`source_sha256` (integrity).** SHA-256 of the original file bytes, computed
+  before any decoding or normalization. This is the value to store for
+  integrity: it proves the bytes are unchanged between hashing and verification.
+  Present only when raw file bytes are available (e.g. `ingest_and_extract`);
+  `None` for raw in-memory text.
+- **`normalized_text_sha256` (deduplication).** SHA-256 of whitespace-collapsed,
+  lowercased extracted text. A **near-duplicate key, not tamper-evidence** —
+  different source bytes (case, whitespace, metadata, undecodable bytes,
+  different no-text PDFs) can collapse to the same value.
 
-`docforensics` reads the XML directly and flags deleted passages:
-
-```python
-from docforensics import docx_to_text
-
-text = docx_to_text("agreement.docx", include_deleted=True)
-# Deleted passages appear as: [DELETED_TEXT: the original removed content]
-```
-
-The `deleted_text_blocks` column in the batch CSV counts these occurrences
-per file, making it easy to triage which documents had content removed.
-
------
-
-## Adding domain-specific patterns
-
-Edit the `DOMAIN_PATTERNS` dict in `docforensics.py`. Every key you add
-automatically becomes a column in the batch CSV output.
-
-```python
-DOMAIN_PATTERNS: dict[str, re.Pattern] = {
-
-    # Detect specific entity names near risk keywords
-    "entity_risk": re.compile(
-        r"(?i)(?:Your Entity Name).{0,50}"
-        r"(?:default|breach|fraud|shortfall)"
-    ),
-
-    # Detect valuation deferral language
-    "valuation_suppression": re.compile(
-        r"(?i)(?:NAV|Net\s*Asset\s*Value).{0,40}"
-        r"(?:avoid|delay|defer).{0,30}"
-        r"(?:write[- ]?down|impairment)"
-    ),
-
-    # Add as many as you need...
-}
-```
-
------
+> An integrity hash is **necessary but not sufficient** for chain of custody,
+> which additionally requires a documented handling log, trusted timestamps, and
+> access control. docforensics provides none of those.
 
 ## Batch CSV columns
 
-|Column                                 |Source                                               |
-|---------------------------------------|-----------------------------------------------------|
-|`file`                                 |Full file path                                       |
-|`extension`                            |File type                                            |
-|`sha256`                               |SHA-256 of normalised text — use for chain-of-custody|
-|`word_count`                           |Total words                                          |
-|`flesch_score`                         |Flesch Reading Ease (higher = more readable)         |
-|`fog_index`                            |Gunning Fog Index (lower = more readable)            |
-|`headings`                             |Number of document headings                          |
-|`paragraphs`                           |Number of paragraphs                                 |
-|`emails`                               |Email addresses found                                |
-|`urls`                                 |URLs found                                           |
-|`dates`                                |Date references found                                |
-|`money_usd` / `money_gbp` / `money_eur`|Currency amounts by denomination                     |
-|`orgs`                                 |Organisation names (rule-based)                      |
-|`persons`                              |Persons with formal titles                           |
-|`statutes`                             |Statutory references (CFR, USC, §)                   |
-|`filings`                              |SEC filing type references                           |
-|`cases`                                |Case citation patterns (X v. Y)                      |
-|`top_unigrams`                         |Top 5 single terms (pipe-separated)                  |
-|`top_bigrams`                          |Top 5 two-word phrases                               |
-|`deleted_text_blocks`                  |Count of `<w:delText>` nodes in DOCX files           |
-|*(domain keys)*                        |One column per entry in `DOMAIN_PATTERNS`            |
-|`error`                                |Non-empty if processing failed                       |
+One row per file. Columns include the typed `outcome` and `detail`, both hashes
+(`source_sha256`, `normalized_text_sha256`), readability, structure counts,
+regex/entity **counts** (leads, not verified values), per-`DOMAIN_PATTERNS`
+flag counts, and `deleted_runs`.
 
------
+`deleted_runs` counts genuine `w:delText` nodes in a DOCX (not a text marker),
+so it **cannot be forged** by ordinary document text. String cells are
+neutralised against spreadsheet formula injection. Files are read exactly once.
 
-## Use cases
+## Extending
 
-- **Legal discovery** — batch-triage hundreds of contracts or filings for
-  specific clauses, counterparty names, or risk terms before manual review
-- **Compliance auditing** — compare internal drafts against final filed
-  versions to identify what was added, removed, or changed
-- **Investigative research** — surface deleted text, cross-reference financial
-  figures between documents, build a co-occurrence graph of named entities
-- **Code archaeology** — run AST analysis across a codebase to extract all
-  string literals, find hardcoded values, or map import dependencies
+Add an `re.compile()` entry to `DOMAIN_PATTERNS` and it becomes a summary and
+CSV column automatically. (Entries added to `PATTERNS` are matched and appear in
+the per-document regex output but do **not** create dedicated CSV columns — only
+`DOMAIN_PATTERNS` keys do.)
 
------
+## Resource limits
 
-## Requirements
+Hostile-input bounds are enforced: container file size (`MAX_FILE_SIZE`, 100 MB),
+decompressed DOCX `document.xml` (`MAX_DECOMPRESSED`, 50 MB — a zip-bomb guard),
+and analysed-text length (`MAX_TEXT_SIZE`, 25 MB). These bound **memory and
+archive expansion.** They do **not** neutralise the quadratic CPU cost of some
+built-in regex patterns on adversarial text — do not batch untrusted documents
+without an external per-process timeout.
 
-- Python 3.10+
-- Standard library only for `.docx`, `.txt`, `.md`, `.py`
-- `pip install pypdf` for `.pdf` support
+## Scope & limitations
 
------
+**Verified / supported**
+- Air-gap compatible: no network, socket, subprocess, telemetry, or cloud calls.
+- Standard-library core; `pypdf` optional for PDF only.
+- `source_sha256` integrity hashing of original bytes.
+- Typed extraction outcomes; parse failures are never analysed as text.
+- Deterministic output (stable across `PYTHONHASHSEED` and filesystem ordering).
+- Structured, un-forgeable DOCX `w:delText` capture.
+
+**Known-limited (treat counts as leads, not facts)**
+- Currency/statute/date/entity patterns mis-parse some values (e.g.
+  `$2.4 billion`, ISO dates, several statute formats, non-ASCII names).
+- DOCX extraction reads only `w:t` / `w:delText` in `word/document.xml`
+  (Transitional WordprocessingML). Headers, footers, comments, foot/endnotes,
+  embedded objects, and Strict-namespace parts are **not** inspected; run-
+  boundary spacing is approximate.
+- Matches carry **no** byte offsets, page coordinates, or paragraph/run IDs.
+
+**Not implemented**
+- Cross-document financial-figure comparison (added/removed/changed amounts).
+- Chain-of-custody / evidentiary authentication.
+- OCR for image-only / scanned PDFs (these return `NO_TEXT`).
+
+Correcting the extraction patterns, adding byte-span provenance, and full DOCX
+fidelity are planned but **not yet present**.
+
+## Tests
+
+`tests/` covers every `parse_pdf` branch against real fixtures: text (single and
+multi-page) → `OK`, image-only/scanned and blank → `NO_TEXT`, encrypted and
+malformed → `FAILED`, and pypdf-absent → `MISSING_DEPENDENCY`. The suite also
+asserts a failed parse is never analysed as text yet still carries
+`source_sha256`.
+
+```sh
+python tests/test_pdf.py          # standalone, needs only pypdf
+# or, under pytest:  pip install pytest && pytest tests/
+```
+
+Fixtures are committed under `tests/fixtures/`; regenerate them with
+`python tests/make_pdf_fixtures.py` (dev deps: `reportlab pillow img2pdf pypdf`).
 
 ## License
 
-MIT
+MIT — see the `LICENSE` file and the module header.
